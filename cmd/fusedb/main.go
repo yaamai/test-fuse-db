@@ -4,16 +4,77 @@ import (
 	"log"
 	"syscall"
 	"context"
-//	"path/filepath"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
 
+type DataGroup struct {
+	ID uint64 `db:"id"`
+	Name string `db:"name"`
+}
+
 type DBFS struct {
-	fs.Inode
 	db *sqlx.DB
+}
+
+type DBFSNode struct {
+	fs.Inode
+	RootData *DBFS
+}
+
+func (n *DBFSNode) EmbeddedInode() *fs.Inode {
+	return &n.Inode
+}
+
+func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	datas := []DataGroup{}
+	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data;")
+	log.Println("readdir: query", err, len(datas))
+
+	entries := []fuse.DirEntry{}
+	for _, data := range datas {
+		entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, data.Name, data.ID*10})
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	log.Println("lookup:", n.Path(n.Root()))
+
+	node := &DBFSNode{RootData: n.RootData}
+	attr := fs.StableAttr{
+		Mode: syscall.S_IFDIR,
+		Gen: 1,
+		Ino: 1234,
+	}
+	return n.NewInode(ctx, node, attr), 0
+}
+
+func main() {
+	db, err := sqlx.Open("postgres", "postgres://postgres:password@localhost/postgres?sslmode=disable")
+	if err != nil {
+		log.Printf("sql.Open error %s", err)
+	}
+
+	root := &DBFSNode{RootData: &DBFS{db: db}}
+	
+	server, err := fs.Mount("/tmp/aa", root, &fs.Options{
+		MountOptions: fuse.MountOptions{
+			DirectMount: true,
+			Debug: true,
+		},
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+
+	server.Wait()
+}
+
+/*
+type DBFS struct {
 }
 
 type DBFSLister struct {
@@ -25,23 +86,7 @@ func (d *DBFS) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 	return 0
 }
 
-type DataGroup struct {
-	ID uint64 `db:"id"`
-	Name string `db:"name"`
-}
 
-func (d *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	datas := []DataGroup{}
-	err := d.db.Select(&datas, "SELECT id, name FROM data;")
-
-	log.Println("query", err, len(datas))
-
-	entries := []fuse.DirEntry{}
-	for _, data := range datas {
-		entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, data.Name, data.ID*10})
-	}
-	return fs.NewListDirStream(entries), 0
-}
 
 
 func (d *DBFS) EmbeddedInode() *fs.Inode {
@@ -59,25 +104,13 @@ func (d *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 }
 
 
-func main() {
-	db, err := sqlx.Open("postgres", "postgres://postgres:password@localhost/postgres?sslmode=disable")
-	if err != nil {
-		log.Printf("sql.Open error %s", err)
-	}
-	
 	mntDir := "/tmp/aa"
 	root := &DBFS{db: db}
 
-	server, err := fs.Mount(mntDir, root, &fs.Options{
-		MountOptions: fuse.MountOptions{DirectMount: true, Debug: true},
-	})
-	if err != nil {
-		log.Panic(err)
-	}
 
 	log.Printf("Mounted on %s", mntDir)
 	log.Printf("Unmount by calling 'fusermount -u %s'", mntDir)
 
 	// Wait until unmount before exiting
 	server.Wait()
-}
+*/
