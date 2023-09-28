@@ -29,13 +29,33 @@ func (n *DBFSNode) EmbeddedInode() *fs.Inode {
 }
 
 func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	datas := []DataGroup{}
-	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data;")
-	log.Println("readdir: query", err, len(datas))
+	// request to root
+	if n.IsRoot() {
+		datas := []DataGroup{}
+		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data;")
+		log.Println("readdir: query", err, len(datas))
 
-	entries := []fuse.DirEntry{}
-	for _, data := range datas {
-		entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, data.Name, data.ID*10})
+		entries := []fuse.DirEntry{}
+		for _, data := range datas {
+			entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, data.Name, data.ID*10})
+		}
+		return fs.NewListDirStream(entries), 0
+	}
+
+	// request to group
+	name := n.Path(n.Root())
+	log.Println("readdir:", name)
+
+	datas := []DataGroup{}
+	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", name)
+	log.Println("query", err, len(datas))
+
+	if err != nil || len(datas) != 1 {
+		return nil, syscall.ENOENT
+	}
+
+	entries := []fuse.DirEntry{
+		{syscall.S_IFREG, "dummy", datas[0].ID+1},
 	}
 	return fs.NewListDirStream(entries), 0
 }
@@ -43,11 +63,29 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	log.Println("lookup:", n.Path(n.Root()))
 
+	if n.IsRoot() {
+		datas := []DataGroup{}
+		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", name)
+		log.Println("query", err, len(datas))
+
+		node := &DBFSNode{RootData: n.RootData}
+		attr := fs.StableAttr{
+			Mode: syscall.S_IFDIR,
+			Gen: 1,
+			Ino: datas[0].ID*10,
+		}
+		return n.NewInode(ctx, node, attr), 0
+	}
+
+	datas := []DataGroup{}
+	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", n.Path(n.Root()))
+	log.Println("query", err, len(datas))
+
 	node := &DBFSNode{RootData: n.RootData}
 	attr := fs.StableAttr{
-		Mode: syscall.S_IFDIR,
+		Mode: syscall.S_IFREG,
 		Gen: 1,
-		Ino: 1234,
+		Ino: datas[0].ID+1,
 	}
 	return n.NewInode(ctx, node, attr), 0
 }
