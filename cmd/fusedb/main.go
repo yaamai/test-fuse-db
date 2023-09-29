@@ -208,6 +208,10 @@ func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	return 0
 }
 
+func (n *DBFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return 0
+}
+
 func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	req := n.parseRequest("")
 
@@ -227,6 +231,20 @@ func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	}
 
 	return fuse.ReadResultData([]byte(datas[0])), 0
+}
+
+func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	req := n.parseRequest("")
+
+	if req == nil {
+		return 0, syscall.ENOENT
+	}
+
+	if req.Group == "" || req.Data == "" {
+		return 0, syscall.ENOENT
+	}
+
+	return 1, 0
 }
 
 func main() {
