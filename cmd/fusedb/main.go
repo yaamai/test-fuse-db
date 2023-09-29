@@ -17,6 +17,7 @@ type DataGroup struct {
 
 type DBFS struct {
 	db *sqlx.DB
+	datas []string
 }
 
 type DBFSNode struct {
@@ -24,13 +25,64 @@ type DBFSNode struct {
 	RootData *DBFS
 }
 
+type DBFSRequest struct {
+	Root bool
+	Group string
+	Data string
+}
+
+func (n *DBFSNode) parseRequest(target string) *DBFSRequest {
+	if n.IsRoot() {
+		if target != "" {
+			return &DBFSRequest{Root: false, Group: target}
+		}
+		return &DBFSRequest{Root: true}
+	}
+
+	parent1, inode1 := n.Parent()
+	if inode1 == nil {
+		if target != "" {
+			return &DBFSRequest{Root: false, Group: target}
+		}
+		return &DBFSRequest{Root: true}
+	}
+
+	if inode1.IsRoot() {
+		if target != "" {
+			return &DBFSRequest{Root: false, Group: parent1, Data: target}
+		}
+		return &DBFSRequest{Root: false, Group: parent1}
+	}
+
+	parent2, inode2 := inode1.Parent()
+	if inode2 == nil {
+		if target != "" {
+			return &DBFSRequest{Root: false, Group: parent1, Data: target}
+		}
+		return &DBFSRequest{Root: false, Group: parent1}
+	}
+
+	if inode2.IsRoot() {
+		if target != "" {
+			return nil
+		}
+		return &DBFSRequest{Root: false, Group: parent2, Data: parent1}
+	}
+
+	return nil
+}
+
 func (n *DBFSNode) EmbeddedInode() *fs.Inode {
 	return &n.Inode
 }
 
 func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// request to root
-	if n.IsRoot() {
+	req := n.parseRequest("")
+	if req == nil {
+		return nil, syscall.ENOENT
+	}
+
+	if req.Root {
 		datas := []DataGroup{}
 		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data;")
 		log.Println("readdir: query", err, len(datas))
@@ -42,31 +94,43 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return fs.NewListDirStream(entries), 0
 	}
 
-	// request to group
-	name := n.Path(n.Root())
-	log.Println("readdir:", name)
+	if req.Group != "" && req.Data == "" {
+		datas := []DataGroup{}
+		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
+		log.Println("query", err, len(datas))
 
-	datas := []DataGroup{}
-	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", name)
-	log.Println("query", err, len(datas))
+		if err != nil || len(datas) != 1 {
+			return nil, syscall.ENOENT
+		}
 
-	if err != nil || len(datas) != 1 {
-		return nil, syscall.ENOENT
+		baseInodeNum := datas[0].ID
+		entries := []fuse.DirEntry{}
+		for idx, d := range n.RootData.datas {
+			entries = append(entries, fuse.DirEntry{
+				syscall.S_IFREG,
+				d,
+				baseInodeNum + uint64(idx+1),
+			})
+		}
+
+		return fs.NewListDirStream(entries), 0
 	}
 
-	entries := []fuse.DirEntry{
-		{syscall.S_IFREG, "dummy", datas[0].ID+1},
-	}
-	return fs.NewListDirStream(entries), 0
+	return nil, syscall.ENOENT
 }
 
 func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Println("lookup:", n.Path(n.Root()))
+	req := n.parseRequest(name)
+	if req == nil {
+		return nil, syscall.ENOENT
+	}
 
-	if n.IsRoot() {
+	if req.Group != "" && req.Data == "" {
 		datas := []DataGroup{}
-		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", name)
-		log.Println("query", err, len(datas))
+		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
+		if err != nil || len(datas) != 1 {
+			return nil, syscall.ENOENT
+		}
 
 		node := &DBFSNode{RootData: n.RootData}
 		attr := fs.StableAttr{
@@ -77,17 +141,63 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return n.NewInode(ctx, node, attr), 0
 	}
 
-	datas := []DataGroup{}
-	err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", n.Path(n.Root()))
-	log.Println("query", err, len(datas))
+	if req.Data != "" {
+		datas := []DataGroup{}
+		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
+		if err != nil || len(datas) != 1 {
+			return nil, syscall.ENOENT
+		}
+		baseInodeNum := datas[0].ID
 
-	node := &DBFSNode{RootData: n.RootData}
-	attr := fs.StableAttr{
-		Mode: syscall.S_IFREG,
-		Gen: 1,
-		Ino: datas[0].ID+1,
+		var inodeNum uint64
+		for idx, d := range n.RootData.datas {
+			if d == req.Data {
+				inodeNum = uint64(idx+1)
+			}
+		}
+		if inodeNum == 0 {
+			return nil, syscall.ENOENT
+		}
+
+		node := &DBFSNode{RootData: n.RootData}
+		attr := fs.StableAttr{
+			Mode: syscall.S_IFREG,
+			Gen: 1,
+			Ino: baseInodeNum+inodeNum,
+		}
+		return n.NewInode(ctx, node, attr), 0
 	}
-	return n.NewInode(ctx, node, attr), 0
+
+	return nil, syscall.ENOENT
+}
+
+func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	log.Println("open:", n.parseRequest(""))
+	return nil, 0, 0
+}
+
+func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	req := n.parseRequest("")
+
+	if req == nil {
+		return syscall.ENOENT
+	}
+
+	if req.Root {
+		return 0
+	}
+
+	if req.Group != "" && req.Data == "" {
+		out.Mode = syscall.S_IFDIR|0o755
+		return 0
+	}
+
+	if req.Data != "" {
+		out.Size = 123
+		return 0
+	}
+
+	return 0
 }
 
 func main() {
@@ -96,12 +206,12 @@ func main() {
 		log.Printf("sql.Open error %s", err)
 	}
 
-	root := &DBFSNode{RootData: &DBFS{db: db}}
+	root := &DBFSNode{RootData: &DBFS{db: db, datas: []string{"ho", "ge", "fu"}}}
 	
 	server, err := fs.Mount("/tmp/aa", root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			DirectMount: true,
-			Debug: true,
+			DirectMount: false,
+			Debug: false,
 		},
 	})
 	if err != nil {
