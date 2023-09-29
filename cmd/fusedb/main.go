@@ -193,11 +193,40 @@ func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	}
 
 	if req.Data != "" {
-		out.Size = 123
+		datas := []int{}
+		// FIXME: variable column name
+		err := n.RootData.db.Select(&datas, "SELECT octet_length(to_json(" + req.Data + ")::text) FROM data WHERE name = $1;", req.Group)
+		if err != nil || len(datas) != 1 {
+			log.Println(err)
+			return syscall.ENOENT
+		}
+		
+		out.Size = uint64(datas[0])
 		return 0
 	}
 
 	return 0
+}
+
+func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	req := n.parseRequest("")
+
+	if req == nil {
+		return nil, syscall.ENOENT
+	}
+
+	if req.Group == "" || req.Data == "" {
+		return nil, syscall.ENOENT
+	}
+
+	datas := []string{}
+	err := n.RootData.db.Select(&datas, "SELECT to_json(" + req.Data + ")::text FROM data WHERE name = $1;", req.Group)
+	if err != nil || len(datas) != 1 {
+		log.Println(err)
+		return nil, syscall.ENOENT
+	}
+
+	return fuse.ReadResultData([]byte(datas[0])), 0
 }
 
 func main() {
@@ -206,12 +235,12 @@ func main() {
 		log.Printf("sql.Open error %s", err)
 	}
 
-	root := &DBFSNode{RootData: &DBFS{db: db, datas: []string{"ho", "ge", "fu"}}}
+	root := &DBFSNode{RootData: &DBFS{db: db, datas: []string{"hoge", "fuga"}}}
 	
 	server, err := fs.Mount("/tmp/aa", root, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			DirectMount: false,
-			Debug: false,
+			Debug: true,
 		},
 	})
 	if err != nil {
