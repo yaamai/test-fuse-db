@@ -35,7 +35,6 @@ func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
 	req := h.node.parseRequest("")
 	err := h.node.RootData.db.PutData(req.Group, req.Data, h.buffer.String())
 	if err != nil {
-		log.Println(err)
 		return syscall.ENOENT
 	}
 
@@ -102,7 +101,6 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if req.Root {
 		groups, err := n.RootData.db.ListGroups()
 		if err != nil {
-			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
@@ -116,7 +114,6 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if req.Group != "" && req.Data == "" {
 		datas, err := n.RootData.db.ListDatas(req.Group)
 		if err != nil {
-			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
@@ -144,7 +141,6 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	if req.Group != "" && req.Data == "" {
 		group, err := n.RootData.db.GetGroup(req.Group)
 		if err != nil || group == nil {
-			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
@@ -160,7 +156,6 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	if req.Data != "" {
 		data, err := n.RootData.db.GetData(req.Group, req.Data)
 		if err != nil || data == nil {
-			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
