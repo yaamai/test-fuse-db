@@ -11,14 +11,8 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type DataGroup struct {
-	ID uint64 `db:"id"`
-	Name string `db:"name"`
-}
-
 type DBFS struct {
-	db *sqlx.DB
-	datas []string
+	db *DB
 }
 
 type DBFSNode struct {
@@ -39,12 +33,12 @@ func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
 	log.Println("buffer:", h.buffer.Len())
 
 	req := h.node.parseRequest("")
-	log.Println("writing", req.Data)
-	_, err := h.node.RootData.db.Queryx("UPDATE data SET " + req.Data + " = $1 WHERE name = $2;", h.buffer.String(), req.Group)
+	err := h.node.RootData.db.PutData(req.Group, req.Data, h.buffer.String())
 	if err != nil {
 		log.Println(err)
 		return syscall.ENOENT
 	}
+
 	return 0
 }
 
@@ -106,33 +100,32 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	}
 
 	if req.Root {
-		datas := []DataGroup{}
-		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data;")
-		log.Println("readdir: query", err, len(datas))
+		groups, err := n.RootData.db.ListGroups()
+		if err != nil {
+			log.Println(err)
+			return nil, syscall.ENOENT
+		}
 
 		entries := []fuse.DirEntry{}
-		for _, data := range datas {
-			entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, data.Name, data.ID*10})
+		for _, g := range groups {
+			entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, g.Name, g.ID})
 		}
 		return fs.NewListDirStream(entries), 0
 	}
 
 	if req.Group != "" && req.Data == "" {
-		datas := []DataGroup{}
-		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
-		log.Println("query", err, len(datas))
-
-		if err != nil || len(datas) != 1 {
+		datas, err := n.RootData.db.ListDatas(req.Group)
+		if err != nil {
+			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
-		baseInodeNum := datas[0].ID
 		entries := []fuse.DirEntry{}
-		for idx, d := range n.RootData.datas {
+		for _, d := range datas {
 			entries = append(entries, fuse.DirEntry{
 				syscall.S_IFREG,
-				d,
-				baseInodeNum + uint64(idx+1),
+				d.Name,
+				d.ID,
 			})
 		}
 
@@ -149,9 +142,9 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	}
 
 	if req.Group != "" && req.Data == "" {
-		datas := []DataGroup{}
-		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
-		if err != nil || len(datas) != 1 {
+		group, err := n.RootData.db.GetGroup(req.Group)
+		if err != nil || group == nil {
+			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
@@ -159,26 +152,15 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		attr := fs.StableAttr{
 			Mode: syscall.S_IFDIR,
 			Gen: 1,
-			Ino: datas[0].ID*10,
+			Ino: group.ID,
 		}
 		return n.NewInode(ctx, node, attr), 0
 	}
 
 	if req.Data != "" {
-		datas := []DataGroup{}
-		err := n.RootData.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", req.Group)
-		if err != nil || len(datas) != 1 {
-			return nil, syscall.ENOENT
-		}
-		baseInodeNum := datas[0].ID
-
-		var inodeNum uint64
-		for idx, d := range n.RootData.datas {
-			if d == req.Data {
-				inodeNum = uint64(idx+1)
-			}
-		}
-		if inodeNum == 0 {
+		data, err := n.RootData.db.GetData(req.Group, req.Data)
+		if err != nil || data == nil {
+			log.Println(err)
 			return nil, syscall.ENOENT
 		}
 
@@ -186,7 +168,7 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		attr := fs.StableAttr{
 			Mode: syscall.S_IFREG,
 			Gen: 1,
-			Ino: baseInodeNum+inodeNum,
+			Ino: data.ID,
 		}
 		return n.NewInode(ctx, node, attr), 0
 	}
@@ -216,15 +198,11 @@ func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 	}
 
 	if req.Data != "" {
-		datas := []int{}
-		// FIXME: variable column name
-		err := n.RootData.db.Select(&datas, "SELECT octet_length(to_json(" + req.Data + ")::text) FROM data WHERE name = $1;", req.Group)
-		if err != nil || len(datas) != 1 {
-			log.Println(err)
+		data, err := n.RootData.db.GetData(req.Group, req.Data)
+		if err != nil || data == nil {
 			return syscall.ENOENT
 		}
-		
-		out.Size = uint64(datas[0])
+		out.Size = uint64(len(data.Data))
 		return 0
 	}
 
@@ -246,14 +224,11 @@ func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 		return nil, syscall.ENOENT
 	}
 
-	datas := []string{}
-	err := n.RootData.db.Select(&datas, "SELECT to_json(" + req.Data + ")::text FROM data WHERE name = $1;", req.Group)
-	if err != nil || len(datas) != 1 {
-		log.Println(err)
+	data, err := n.RootData.db.GetData(req.Group, req.Data)
+	if err != nil || data == nil {
 		return nil, syscall.ENOENT
 	}
-
-	return fuse.ReadResultData([]byte(datas[0])), 0
+	return fuse.ReadResultData([]byte(data.Data)), 0
 }
 
 func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
@@ -281,7 +256,7 @@ func main() {
 		log.Printf("sql.Open error %s", err)
 	}
 
-	root := &DBFSNode{RootData: &DBFS{db: db, datas: []string{"hoge", "fuga"}}}
+	root := &DBFSNode{RootData: &DBFS{db: &DB{DB: db, dataNames: []string{"hoge", "fuga"}}}}
 	
 	server, err := fs.Mount("/tmp/aa", root, &fs.Options{
 		MountOptions: fuse.MountOptions{
@@ -295,45 +270,3 @@ func main() {
 
 	server.Wait()
 }
-
-/*
-type DBFS struct {
-}
-
-type DBFSLister struct {
-}
-
-func (d *DBFS) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	out.Mode = syscall.S_IFDIR|0755
-	log.Println("getattr", d.IsRoot(), out.Attr)
-	return 0
-}
-
-
-
-
-func (d *DBFS) EmbeddedInode() *fs.Inode {
-	return &d.Inode
-}
-
-func (d *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Println("lookup", name, d.IsRoot(), d.Inode.String())
-
-	datas := []DataGroup{}
-	err := d.db.Select(&datas, "SELECT id, name FROM data WHERE name = $1;", name)
-	log.Println("query", err, len(datas))
-
-	return d.NewInode(ctx, d, fs.StableAttr{syscall.S_IFDIR, datas[0].ID, 0}), 0
-}
-
-
-	mntDir := "/tmp/aa"
-	root := &DBFS{db: db}
-
-
-	log.Printf("Mounted on %s", mntDir)
-	log.Printf("Unmount by calling 'fusermount -u %s'", mntDir)
-
-	// Wait until unmount before exiting
-	server.Wait()
-*/
