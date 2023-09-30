@@ -22,6 +22,7 @@ type DBFSNode struct {
 
 type DBFSFileHandle struct {
 	node *DBFSNode
+	req *DBFSRequest
 	buffer bytes.Buffer
 }
 
@@ -32,7 +33,7 @@ func (h *DBFSFileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno 
 func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
 	log.Println("buffer:", h.buffer.Len())
 
-	req := h.node.parseRequest("")
+	req := ParseRequest(&h.node.Inode, "")
 	err := h.node.RootData.db.PutData(req.Group, req.Data, h.buffer.String())
 	if err != nil {
 		return syscall.ENOENT
@@ -41,51 +42,43 @@ func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-type DBFSRequest struct {
-	Root bool
-	Group string
-	Data string
+func (h *DBFSFileHandle) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return 0
 }
 
-func (n *DBFSNode) parseRequest(target string) *DBFSRequest {
-	if n.IsRoot() {
-		if target != "" {
-			return &DBFSRequest{Root: false, Group: target}
-		}
-		return &DBFSRequest{Root: true}
-	}
+func (h *DBFSFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if h.req.IsRoot() || h.req.IsGroup() {
+		return nil, syscall.ENOTSUP
 
-	parent1, inode1 := n.Parent()
-	if inode1 == nil {
-		if target != "" {
-			return &DBFSRequest{Root: false, Group: target}
+	} else if h.req.IsData() {
+		data, err := h.node.RootData.db.GetData(h.req.Group, h.req.Data)
+		if err != nil {
+			return nil, syscall.EIO
 		}
-		return &DBFSRequest{Root: true}
-	}
-
-	if inode1.IsRoot() {
-		if target != "" {
-			return &DBFSRequest{Root: false, Group: parent1, Data: target}
+		if data == nil {
+			return nil, syscall.ENOENT
 		}
-		return &DBFSRequest{Root: false, Group: parent1}
-	}
+		return fuse.ReadResultData([]byte(data.Data)), 0
 
-	parent2, inode2 := inode1.Parent()
-	if inode2 == nil {
-		if target != "" {
-			return &DBFSRequest{Root: false, Group: parent1, Data: target}
+	} else {
+		return nil, syscall.ENOSYS
+	}
+}
+
+func (h *DBFSFileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+	if h.req.IsRoot() || h.req.IsGroup() {
+		return 0, syscall.ENOTSUP
+
+	} else if h.req.IsData() {
+		written, err := h.buffer.Write(data)
+		if err != nil {
+			return 0, syscall.ENOENT
 		}
-		return &DBFSRequest{Root: false, Group: parent1}
-	}
 
-	if inode2.IsRoot() {
-		if target != "" {
-			return nil
-		}
-		return &DBFSRequest{Root: false, Group: parent2, Data: parent1}
+		return uint32(written), 0
+	} else {
+		return 0, syscall.ENOSYS
 	}
-
-	return nil
 }
 
 func (n *DBFSNode) EmbeddedInode() *fs.Inode {
@@ -93,15 +86,15 @@ func (n *DBFSNode) EmbeddedInode() *fs.Inode {
 }
 
 func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	req := n.parseRequest("")
+	req := ParseRequest(&n.Inode, "")
 	if req == nil {
-		return nil, syscall.ENOENT
+		return nil, syscall.EINVAL
 	}
 
-	if req.Root {
+	if req.IsRoot() {
 		groups, err := n.RootData.db.ListGroups()
 		if err != nil {
-			return nil, syscall.ENOENT
+			return nil, syscall.EIO
 		}
 
 		entries := []fuse.DirEntry{}
@@ -109,12 +102,10 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			entries = append(entries, fuse.DirEntry{syscall.S_IFDIR, g.Name, g.ID})
 		}
 		return fs.NewListDirStream(entries), 0
-	}
-
-	if req.Group != "" && req.Data == "" {
+	} else if req.IsGroup() {
 		datas, err := n.RootData.db.ListDatas(req.Group)
 		if err != nil {
-			return nil, syscall.ENOENT
+			return nil, syscall.EIO
 		}
 
 		entries := []fuse.DirEntry{}
@@ -127,18 +118,18 @@ func (n *DBFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 
 		return fs.NewListDirStream(entries), 0
+	} else {
+		return nil, syscall.ENOSYS
 	}
-
-	return nil, syscall.ENOENT
 }
 
 func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	req := n.parseRequest(name)
+	req := ParseRequest(&n.Inode, name)
 	if req == nil {
-		return nil, syscall.ENOENT
+		return nil, syscall.EINVAL
 	}
 
-	if req.Group != "" && req.Data == "" {
+	if req.IsGroup() {
 		group, err := n.RootData.db.GetGroup(req.Group)
 		if err != nil || group == nil {
 			return nil, syscall.ENOENT
@@ -151,9 +142,7 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			Ino: group.ID,
 		}
 		return n.NewInode(ctx, node, attr), 0
-	}
-
-	if req.Data != "" {
+	} else if req.IsData() {
 		data, err := n.RootData.db.GetData(req.Group, req.Data)
 		if err != nil || data == nil {
 			return nil, syscall.ENOENT
@@ -166,84 +155,51 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			Ino: data.ID,
 		}
 		return n.NewInode(ctx, node, attr), 0
+	} else {
+		return nil, syscall.ENOSYS
 	}
-
-	return nil, syscall.ENOENT
-}
-
-func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	log.Println("open:", n.parseRequest(""))
-	return &DBFSFileHandle{node: n}, 0, 0
 }
 
 func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	req := n.parseRequest("")
-
+	req := ParseRequest(&n.Inode, "")
 	if req == nil {
-		return syscall.ENOENT
+		return syscall.EINVAL
 	}
 
-	if req.Root {
-		return 0
-	}
-
-	if req.Group != "" && req.Data == "" {
+	if req.IsRoot() {
 		out.Mode = syscall.S_IFDIR|0o755
 		return 0
-	}
 
-	if req.Data != "" {
+	} else if req.IsGroup() {
+		out.Mode = syscall.S_IFDIR|0o755
+		return 0
+
+	} else if req.IsData() {
 		data, err := n.RootData.db.GetData(req.Group, req.Data)
-		if err != nil || data == nil {
+		if err != nil {
+			return syscall.EIO
+		}
+		if data == nil {
 			return syscall.ENOENT
 		}
 		out.Size = uint64(len(data.Data))
+		out.Mode = syscall.S_IFREG|0o666
 		return 0
+
+	} else {
+		return syscall.ENOSYS
 	}
-
-	return 0
 }
 
-func (n *DBFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	return 0
-}
-
-func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	req := n.parseRequest("")
-
+func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	req := ParseRequest(&n.Inode, "")
 	if req == nil {
-		return nil, syscall.ENOENT
+		return nil, 0, syscall.EINVAL
 	}
 
-	if req.Group == "" || req.Data == "" {
-		return nil, syscall.ENOENT
-	}
-
-	data, err := n.RootData.db.GetData(req.Group, req.Data)
-	if err != nil || data == nil {
-		return nil, syscall.ENOENT
-	}
-	return fuse.ReadResultData([]byte(data.Data)), 0
+	return &DBFSFileHandle{node: n, req: req}, 0, 0
 }
 
-func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	req := n.parseRequest("")
-
-	if req == nil {
-		return 0, syscall.ENOENT
-	}
-
-	if req.Group == "" || req.Data == "" {
-		return 0, syscall.ENOENT
-	}
-
-	written, err := f.(*DBFSFileHandle).buffer.Write(data)
-	if err != nil {
-		return 0, syscall.ENOENT
-	}
-
-	return uint32(written), 0
-}
 
 func main() {
 	db, err := sqlx.Open("postgres", "postgres://postgres:password@localhost/postgres?sslmode=disable")
