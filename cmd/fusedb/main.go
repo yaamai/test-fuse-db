@@ -4,6 +4,7 @@ import (
 	"log"
 	"syscall"
 	"context"
+	"bytes"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/jmoiron/sqlx"
@@ -23,6 +24,28 @@ type DBFS struct {
 type DBFSNode struct {
 	fs.Inode
 	RootData *DBFS
+}
+
+type DBFSFileHandle struct {
+	node *DBFSNode
+	buffer bytes.Buffer
+}
+
+func (h *DBFSFileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	return 0
+}
+
+func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
+	log.Println("buffer:", h.buffer.Len())
+
+	req := h.node.parseRequest("")
+	log.Println("writing", req.Data)
+	_, err := h.node.RootData.db.Queryx("UPDATE data SET " + req.Data + " = $1 WHERE name = $2;", h.buffer.String(), req.Group)
+	if err != nil {
+		log.Println(err)
+		return syscall.ENOENT
+	}
+	return 0
 }
 
 type DBFSRequest struct {
@@ -173,7 +196,7 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Println("open:", n.parseRequest(""))
-	return nil, 0, 0
+	return &DBFSFileHandle{node: n}, 0, 0
 }
 
 func (n *DBFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -233,7 +256,7 @@ func (n *DBFSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off i
 	return fuse.ReadResultData([]byte(datas[0])), 0
 }
 
-func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	req := n.parseRequest("")
 
 	if req == nil {
@@ -244,7 +267,12 @@ func (n *DBFSNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off 
 		return 0, syscall.ENOENT
 	}
 
-	return 1, 0
+	written, err := f.(*DBFSFileHandle).buffer.Write(data)
+	if err != nil {
+		return 0, syscall.ENOENT
+	}
+
+	return uint32(written), 0
 }
 
 func main() {
