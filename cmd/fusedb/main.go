@@ -42,9 +42,6 @@ func (h *DBFSFileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-func (h *DBFSFileHandle) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	return 0
-}
 
 func (h *DBFSFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if h.req.IsRoot() || h.req.IsGroup() {
@@ -58,7 +55,8 @@ func (h *DBFSFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse
 		if data == nil {
 			return nil, syscall.ENOENT
 		}
-		return fuse.ReadResultData([]byte(data.Data)), 0
+		copy(dest, []byte(data.Data)[off:])
+		return fuse.ReadResultData(dest), 0
 
 	} else {
 		return nil, syscall.ENOSYS
@@ -200,6 +198,10 @@ func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 	return &DBFSFileHandle{node: n, req: req}, 0, 0
 }
 
+func (h *DBFSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	log.Println("setattr")
+	return 0
+}
 
 func main() {
 	db, err := sqlx.Open("postgres", "postgres://postgres:password@localhost/postgres?sslmode=disable")
