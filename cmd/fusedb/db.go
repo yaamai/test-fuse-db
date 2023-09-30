@@ -21,6 +21,11 @@ type Data struct {
 	Data string `db:"data"`
 }
 
+func (d *DB) CreateGroup(groupName string) (error) {
+	_, err := d.Queryx("INSERT INTO data(name) VALUES($1);", groupName)
+	return err
+}
+
 func (d *DB) PutData(groupName string, dataName string, data string) error {
 	_, err := d.Queryx("UPDATE data SET " + dataName + " = $1 WHERE name = $2;", data, groupName)
 	return err

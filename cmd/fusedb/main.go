@@ -142,6 +142,7 @@ func (n *DBFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return n.NewInode(ctx, node, attr), 0
 	} else if req.IsData() {
 		data, err := n.RootData.db.GetData(req.Group, req.Data)
+		log.Println("lookup", data, err)
 		if err != nil || data == nil {
 			return nil, syscall.ENOENT
 		}
@@ -198,9 +199,68 @@ func (n *DBFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 	return &DBFSFileHandle{node: n, req: req}, 0, 0
 }
 
-func (h *DBFSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (n *DBFSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	log.Println("setattr")
 	return 0
+}
+
+func (n *DBFSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	req := ParseRequest(&n.Inode, name)
+	if req == nil {
+		return nil, syscall.EINVAL
+	}
+
+	if req.IsGroup() {
+		err := n.RootData.db.CreateGroup(req.Group)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+
+		group, err := n.RootData.db.GetGroup(req.Group)
+		if err != nil || group == nil {
+			return nil, syscall.ENOENT
+		}
+
+		node := &DBFSNode{RootData: n.RootData}
+		attr := fs.StableAttr{
+			Mode: syscall.S_IFDIR,
+			Gen: 1,
+			Ino: group.ID,
+		}
+
+		return n.NewInode(ctx, node, attr), 0
+	}
+	return nil, 0
+}
+
+func (n *DBFSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	req := ParseRequest(&n.Inode, name)
+	if req == nil {
+		return nil, nil, 0, syscall.EINVAL
+	}
+
+	if req.IsData() {
+		err := n.RootData.db.PutData(req.Group, req.Data, "{}")
+		if err != nil {
+			return nil, nil, 0, syscall.EIO
+		}
+
+		group, err := n.RootData.db.GetGroup(req.Group)
+		if err != nil || group == nil {
+			return nil, nil, 0, syscall.ENOENT
+		}
+
+		node := &DBFSNode{RootData: n.RootData}
+		attr := fs.StableAttr{
+			Mode: syscall.S_IFDIR,
+			Gen: 1,
+			Ino: group.ID,
+		}
+
+		return n.NewInode(ctx, node, attr), &DBFSFileHandle{node: n, req: req}, 0, 0
+	}
+
+	return nil, nil, 0, syscall.EINVAL
 }
 
 func main() {
