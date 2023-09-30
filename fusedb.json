@@ -1,0 +1,5 @@
+{
+	"filenames": ["config.json"],
+	"direct_mount": false,
+	"debug": false
+}
